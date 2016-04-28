@@ -15,6 +15,8 @@ import 'parser.dart';
 import 'utils.dart';
 import 'discovery/api.dart';
 import 'discovery/config.dart';
+import 'package:http2/multiprotocol_server.dart';
+import 'package:http2/transport.dart';
 
 typedef Future HttpRequestHandler(io.HttpRequest request);
 
@@ -62,6 +64,74 @@ class ApiServer {
         }
         return sendApiResponse(apiResponse, request.response);
       };
+
+
+  /// Getter for a simple dart:io Http2Request handler.
+  Http2RequestHandler get http2RequestHandler => (ServerTransportStream stream) async {
+    var apiResponse;
+    String path;
+    List<Header> headers;
+    List<int> data = new List();
+
+    try {
+      stream.incomingMessages.listen(
+        // Processing request data
+        (StreamMessage message) async {
+          if (message is HeadersStreamMessage) {
+            headers = message.headers;
+            // TODO Indien ongeldig path or favicon, dan hier al onderbreken
+
+          } else if (message is DataStreamMessage) {
+            data.addAll(message.bytes);
+          };
+        },
+
+        // Create response data
+        onDone: () async {
+          path = pathFromHeaders(headers);
+
+          if (path == null) {
+            return new HttpApiResponse.error(io.HttpStatus.BAD_REQUEST, 'No path found', null, null);
+          }
+
+          if (path == '/favicon.ico') {
+            return new HttpApiResponse.error(io.HttpStatus.NO_CONTENT, null, null, null);
+          }
+
+          if (!path.startsWith(_apiPrefix)) {
+            return new HttpApiResponse.error(io.HttpStatus.NOT_IMPLEMENTED, 'Invalid request for path: ${path}', null, null);
+          }
+        },
+
+        onError: () async {
+          // Return error information
+          return new HttpApiResponse.error(io.HttpStatus.INTERNAL_SERVER_ERROR, null, null, null); // TODO
+        },
+
+        cancelOnError: true
+      );
+      // request/response return/future callback
+      var apiRequest = new HttpApiRequest.fromHttp2Request(stream);
+      if (apiRequest != null) {
+        apiResponse = await handleHttpApiRequest(apiRequest); // Response
+      } else {
+        // TODO Handle error?
+      }
+
+    } catch (error, stack) {
+      // TODO
+      var exception = error;
+      if (exception is Error) {
+        exception = new Exception(exception.toString());
+      }
+
+      return new HttpApiResponse.error(io.HttpStatus.INTERNAL_SERVER_ERROR, exception.toString(), exception, stack);
+    }
+
+    // TODO
+    return sendApiResponse(apiResponse, request.response);
+  };
+
 
   /// Add a new api to the API server.
   String addApi(api) {

@@ -14,7 +14,10 @@ import 'config.dart';
 import 'errors.dart';
 import 'message.dart';
 import 'parser.dart';
+import 'dart:convert';
 import 'discovery/config.dart' as discovery;
+import 'package:http2/multiprotocol_server.dart';
+import 'package:http2/transport.dart';
 
 // Global constants
 const List<String> bodyLessMethods = const ['GET', 'DELETE'];
@@ -126,4 +129,13 @@ void logMethodInvocation(Symbol symbol, List<dynamic> positionalParams,
   namedParams.forEach((symbol, value) =>
       msg.writeln('    ${MirrorSystem.getName(symbol)}: $value'));
   rpcLogger.fine(msg.toString());
+}
+
+String pathFromHeaders(List<Header> headers) {
+  for (int i = 0 ; i < headers.length; i++) {
+    if (ASCII.decode(headers[i].name) == ':path') {
+      return ASCII.decode(headers[i].value);
+    }
+  }
+  throw new Exception('Expected a :path header, but did not find one.');
 }
