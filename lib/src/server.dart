@@ -15,10 +15,10 @@ import 'parser.dart';
 import 'utils.dart';
 import 'discovery/api.dart';
 import 'discovery/config.dart';
-import 'package:http2/multiprotocol_server.dart';
 import 'package:http2/transport.dart';
 
 typedef Future HttpRequestHandler(io.HttpRequest request);
+typedef Future Http2RequestHandler(ServerTransportStream stream);
 
 /// The main class for handling all API requests.
 class ApiServer {
@@ -69,68 +69,83 @@ class ApiServer {
   /// Getter for a simple dart:io Http2Request handler.
   Http2RequestHandler get http2RequestHandler => (ServerTransportStream stream) async {
     var apiResponse;
+    try {
+      return fromHttp2Request(stream, handleHttpApiRequest, sendApiHttp2Response);
+    } catch (error, stack) {
+      var exception = (error is Error) ?  new Exception(error.toString()) : error;
+
+      apiResponse = new HttpApiResponse.error(io.HttpStatus.INTERNAL_SERVER_ERROR, exception.toString(), exception, stack);
+    }
+
+    return sendApiHttp2Response(apiResponse, stream);
+  };
+
+  Future<HttpApiResponse> fromHttp2Request(
+      ServerTransportStream stream,
+      Future<HttpApiResponse> onRequest(HttpApiRequest request),
+      Future onResponse(HttpApiResponse response, ServerTransportStream stream)
+    ) async {
+    var apiResponse;
     String path;
     List<Header> headers;
     List<int> data = new List();
 
-    try {
-      stream.incomingMessages.listen(
-        // Processing request data
-        (StreamMessage message) async {
-          if (message is HeadersStreamMessage) {
-            headers = message.headers;
-            // TODO Indien ongeldig path or favicon, dan hier al onderbreken
+    stream.incomingMessages.listen(
+      // Processing request data
+      (StreamMessage message) async {
+        if (message is HeadersStreamMessage) {
+          headers = message.headers;
+          // TODO Indien ongeldig path or favicon, dan hier al onderbreken
 
-          } else if (message is DataStreamMessage) {
-            data.addAll(message.bytes);
-          };
-        },
+        } else if (message is DataStreamMessage) {
+          data.addAll(message.bytes);
+        };
+      },
 
-        // Create response data
-        onDone: () async {
-          path = pathFromHeaders(headers);
+      // Create response data
+      onDone: () async {
+        path = pathFromHeaders(headers);
 
-          if (path == null) {
-            return new HttpApiResponse.error(io.HttpStatus.BAD_REQUEST, 'No path found', null, null);
-          }
+        if (path == null) {
+          onResponse(new HttpApiResponse.error(io.HttpStatus.BAD_REQUEST, 'No path found', null, null), stream);
+        }
 
-          if (path == '/favicon.ico') {
-            return new HttpApiResponse.error(io.HttpStatus.NO_CONTENT, null, null, null);
-          }
+        if (path == '/favicon.ico') {
+          onResponse(new HttpApiResponse.error(io.HttpStatus.NO_CONTENT, null, null, null), stream);
+        }
 
-          if (!path.startsWith(_apiPrefix)) {
-            return new HttpApiResponse.error(io.HttpStatus.NOT_IMPLEMENTED, 'Invalid request for path: ${path}', null, null);
-          }
-        },
+        if (!path.startsWith(_apiPrefix)) {
+          onResponse(new HttpApiResponse.error(io.HttpStatus.NOT_IMPLEMENTED, 'Invalid request for path: ${path}', null, null), stream);
+        }
 
-        onError: () async {
-          // Return error information
-          return new HttpApiResponse.error(io.HttpStatus.INTERNAL_SERVER_ERROR, null, null, null); // TODO
-        },
+        Map<String, dynamic> headerMap = new Map();
+        headers.forEach((header) {
+          headerMap[ASCII.decode(header.name)] =
+              ASCII.decode(header.value);
+          print("${ASCII.decode(header.name)}: ${ASCII.decode(
+              header.value)}");
+        });
 
-        cancelOnError: true
-      );
-      // request/response return/future callback
-      var apiRequest = new HttpApiRequest.fromHttp2Request(stream);
-      if (apiRequest != null) {
-        apiResponse = await handleHttpApiRequest(apiRequest); // Response
-      } else {
-        // TODO Handle error?
-      }
+        HttpApiRequest request = new HttpApiRequest(
+            "GET",
+            Uri.parse(path),
+            headerMap,
+            new Stream.fromIterable(data)
+        );
 
-    } catch (error, stack) {
-      // TODO
-      var exception = error;
-      if (exception is Error) {
-        exception = new Exception(exception.toString());
-      }
+        return onRequest(request).then((HttpApiResponse response){
+          return onResponse(response, stream);
+        });
+      },
 
-      return new HttpApiResponse.error(io.HttpStatus.INTERNAL_SERVER_ERROR, exception.toString(), exception, stack);
-    }
+      onError: (dynamic error) async {
+        // Return error information
+        onResponse(new HttpApiResponse.error(io.HttpStatus.INTERNAL_SERVER_ERROR, null, null, null), stream);
+      },
 
-    // TODO
-    return sendApiResponse(apiResponse, request.response);
-  };
+      cancelOnError: true
+    );
+  }
 
 
   /// Add a new api to the API server.
@@ -258,3 +273,29 @@ Future sendApiResponse(HttpApiResponse apiResponse, io.HttpResponse response) {
     return response.close();
   }
 }
+
+
+/// Helper for converting an HttpApiResponse to a Http2Response and sending it.
+Future sendApiHttp2Response(HttpApiResponse response, ServerTransportStream stream) async {
+  List<Header> headerList = [new Header.ascii(':status', response.status.toString())];
+
+  response.headers.forEach((String key, dynamic value) {
+    print("${key}: ${value}");
+    headerList.add(
+        new Header.ascii(key, value)
+    );
+  });
+
+  stream.outgoingMessages.add(
+      new HeadersStreamMessage(headerList)
+  );
+
+  await response.body.forEach((data) {
+    stream.outgoingMessages.add(
+        new DataStreamMessage(data)
+    );
+  });
+
+  return stream.outgoingMessages.close();
+}
+
